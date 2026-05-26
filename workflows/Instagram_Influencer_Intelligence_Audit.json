@@ -1,0 +1,1194 @@
+{
+  "name": "Instagram Influencer Intelligence & Audit",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "instagram-influencer-audit",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "5bb0eda1-11c1-40f1-8797-7e6c3a71b1bf",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1920,
+        192
+      ],
+      "webhookId": "e8627939-6dce-4378-805e-ce0f87b5b0ed"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node: Normalize Input\n// Extracts username from URL or @handle; never fabricates profile facts.\n\nconst raw =\n  $json.body?.instagram_url ||\n  $json.body?.instagram_handle ||\n  $json.body?.url ||\n  $json.instagram_url ||\n  $json.instagram_handle ||\n  $json.url ||\n  '';\n\nif (!raw || String(raw).trim() === '') {\n  return [{\n    json: {\n      ok: false,\n      error: 'MISSING_INPUT',\n      message: 'Provide instagram_url or instagram_handle in request body.',\n    },\n  }];\n}\n\nlet input = String(raw).trim();\ninput = input.replace(/^@/, '');\n\nlet username = input;\nconst urlMatch = input.match(/instagram\\.com\\/([A-Za-z0-9._]+)/i);\nif (urlMatch) username = urlMatch[1];\nusername = username.split('?')[0].split('/')[0].replace('@', '').toLowerCase();\n\nif (!/^[a-z0-9._]{1,30}$/i.test(username)) {\n  return [{\n    json: {\n      ok: false,\n      error: 'INVALID_HANDLE',\n      message: `Could not parse Instagram username from: ${raw}`,\n    },\n  }];\n}\n\nconst windowDays = Number($json.body?.window_days || $json.window_days || 30);\nconst maxPosts = Number($json.body?.max_posts || $json.max_posts || 50);\nconst enableWhisper = $json.body?.enable_whisper !== false;\n\nreturn [{\n  json: {\n    ok: true,\n    username,\n    profile_url: `https://www.instagram.com/${username}/`,\n    window_days: windowDays,\n    max_posts: Math.min(Math.max(maxPosts, 10), 100),\n    enable_whisper: enableWhisper,\n    requested_at: new Date().toISOString(),\n    xlsx_api_url: 'https://YOUR-SERVICE-NAME.onrender.com/generate',\n  },\n}];\n"
+      },
+      "id": "52743b96-4cba-46ea-9752-131207f4343c",
+      "name": "Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1680,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "c76cd8d1-842a-4848-98f7-60242ef6072f",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a3b07888-1b10-420c-86ee-0dd43358f5a1",
+      "name": "IF Input Valid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1488,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "p1",
+              "name": "poll_attempt",
+              "value": 0,
+              "type": "number"
+            },
+            {
+              "id": "p2",
+              "name": "max_poll_attempts",
+              "value": 12,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "f3f8e245-747d-40bc-a94d-d73ed7e12e06",
+      "name": "Init Poll Counter",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1216,
+        -336
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "9532fdfb-212e-4241-b817-fcdedddf5b0b",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0267151a-aaa7-409c-a4d0-3ff62dbe8e2f",
+      "name": "IF Parse OK",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node: Compute Analytics + filter window\n\nconst ctx = $('Normalize Input').first().json;\nconst parsed = $('Parse Merged Dataset').first().json;\nconst profile = parsed.profile;\n\nif (parsed.warning === 'PRIVATE_PROFILE') {\n  const ctxPrivate = $('Normalize Input').first().json;\n  return [{\n    json: {\n      ok: true,\n      warning: 'PRIVATE_PROFILE',\n      message: parsed.message,\n      meta: {\n        username: profile.username,\n        window_days: ctxPrivate.window_days || 30,\n        generated_date: new Date().toISOString().slice(0, 10),\n      },\n      profile,\n      posts: [],\n      metrics: {\n        post_count: 0,\n        reel_count: 0,\n        total_views: 0,\n        total_likes: 0,\n        total_engagement: 0,\n        avg_views: 0,\n        avg_likes: 0,\n        avg_engagement_rate: 0,\n        avg_views_last_10: 0,\n        posting_frequency_per_week: 0,\n        low_engagement_reels: 0,\n      },\n      posting_day_breakdown: [],\n      top_posts: [],\n      bottom_posts: [],\n    },\n  }];\n}\n\nlet posts = [...parsed.posts];\n\nconst windowDays = ctx.window_days || 30;\nconst cutoff = new Date();\ncutoff.setDate(cutoff.getDate() - windowDays);\n\nposts = posts\n  .filter((p) => {\n    if (!p.posted_at) return true;\n    return new Date(p.posted_at) >= cutoff;\n  });\n\nif (!posts.length) {\n  return [{\n    json: {\n      ok: false,\n      error: 'NO_POSTS_IN_WINDOW',\n      message: `No posts in last ${windowDays} days.`,\n      profile,\n    },\n  }];\n}\n\nfunction engagementRate(p) {\n  const views = Number(p.views) || 0;\n  if (views <= 0) return 0;\n  return (Number(p.engagement) || 0) / views;\n}\n\nfunction statusLabel(p) {\n  const views = Number(p.views) || 0;\n  const rate = engagementRate(p);\n  if (views >= 500000 && rate >= 0.05) return 'Viral';\n  if (views >= 100000 && rate >= 0.03) return 'Strong';\n  if (views === 0 && (p.likes || 0) > 50000) return 'Top Performer';\n  if (rate < 0.01 && views > 0) return 'Needs Work';\n  return 'Average';\n}\n\nfunction viewsDisplayRate(rate, views) {\n  if (!views) return '0.0%';\n  return `${(rate * 100).toFixed(2)}%`;\n}\n\nfunction captionBucket(caption) {\n  const words = (caption || '').trim().split(/\\s+/).filter(Boolean).length;\n  if (words < 30) return 'Short (<30w)';\n  if (words < 80) return 'Medium (30-80w)';\n  return 'Long (80w+)';\n}\n\nfunction weekdayName(dateStr) {\n  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];\n  return days[new Date(dateStr).getDay()];\n}\n\nposts = posts.map((p) => {\n  const rate = engagementRate(p);\n  return {\n    ...p,\n    engagement_rate: rate,\n    engagement_rate_pct: Math.round(rate * 10000) / 100,\n    engagement_rate_display: viewsDisplayRate(rate, p.views),\n    status: statusLabel(p),\n    topic: p.topic || '',\n    hook_type: p.hook_type || '',\n    caption_length_bucket: captionBucket(p.caption),\n    weekday: p.posted_at ? weekdayName(p.posted_at) : 'Unknown',\n  };\n});\n\nconst totalViews = posts.reduce((s, p) => s + (Number(p.views) || 0), 0);\nconst totalLikes = posts.reduce((s, p) => s + (Number(p.likes) || 0), 0);\nconst totalEngagement = posts.reduce((s, p) => s + (Number(p.engagement) || 0), 0);\nconst postsWithViews = posts.filter((p) => (p.views || 0) > 0);\nconst avgViews = postsWithViews.length ? totalViews / postsWithViews.length : 0;\nconst avgLikes = totalLikes / posts.length;\nconst avgEngagementRate = totalViews > 0 ? totalEngagement / totalViews : 0;\n\n// Chronological last 10 posts (not top-by-views)\nconst chronoDesc = [...posts].sort((a, b) => {\n  const da = a.posted_at ? new Date(a.posted_at).getTime() : 0;\n  const db = b.posted_at ? new Date(b.posted_at).getTime() : 0;\n  return db - da;\n});\nconst last10Chrono = chronoDesc.slice(0, 10);\nconst avgViewsLast10 =\n  last10Chrono.reduce((s, p) => s + (Number(p.views) || 0), 0) / Math.max(last10Chrono.length, 1);\n\nconst reelsOnly = posts.filter((p) => p.type === 'Reel');\nconst postingFrequencyPerWeek = (posts.length / windowDays) * 7;\n\nconst dayMap = {};\nfor (const p of posts) {\n  const d = p.weekday || 'Unknown';\n  if (!dayMap[d]) dayMap[d] = { count: 0, views: [], rates: [] };\n  dayMap[d].count += 1;\n  dayMap[d].views.push(Number(p.views) || 0);\n  dayMap[d].rates.push(p.engagement_rate || 0);\n}\n\nconst postingDayBreakdown = Object.entries(dayMap)\n  .map(([day, v]) => {\n    const avgV = v.views.reduce((a, b) => a + b, 0) / v.views.length;\n    const avgR = v.rates.reduce((a, b) => a + b, 0) / v.rates.length;\n    return {\n      day,\n      count: v.count,\n      avg_views: avgV,\n      avg_views_display: Math.round(avgV).toLocaleString('en-US'),\n      avg_eng_rate_display: `${(avgR * 100).toFixed(2)}%`,\n    };\n  })\n  .sort((a, b) => b.avg_views - a.avg_views);\n\nconst sortedByViews = [...posts].sort((a, b) => (b.views || 0) - (a.views || 0));\nconst topPosts = sortedByViews.slice(0, 5);\nconst bottomPosts = [...posts]\n  .sort((a, b) => {\n    const av = a.views || 0;\n    const bv = b.views || 0;\n    if (av === bv) return (a.engagement_rate || 0) - (b.engagement_rate || 0);\n    return av - bv;\n  })\n  .slice(0, 5);\n\nconst lowEngReels = posts.filter(\n  (p) => p.type === 'Reel' && (p.engagement_rate || 0) < 0.01\n).length;\n\n// Default list order: by views desc for audit table\nposts.sort((a, b) => (b.views || 0) - (a.views || 0));\n\nreturn [{\n  json: {\n    ok: true,\n    meta: {\n      username: profile.username,\n      window_days: windowDays,\n      generated_date: new Date().toISOString().slice(0, 10),\n    },\n    profile,\n    posts,\n    metrics: {\n      post_count: posts.length,\n      reel_count: reelsOnly.length,\n      total_views: totalViews,\n      total_likes: totalLikes,\n      total_engagement: totalEngagement,\n      avg_views: Math.round(avgViews),\n      avg_likes: Math.round(avgLikes),\n      avg_engagement_rate: avgEngagementRate,\n      avg_views_last_10: Math.round(avgViewsLast10),\n      posting_frequency_per_week: Math.round(postingFrequencyPerWeek * 10) / 10,\n      low_engagement_reels: lowEngReels,\n    },\n    posting_day_breakdown: postingDayBreakdown,\n    top_posts: topPosts,\n    bottom_posts: bottomPosts,\n  },\n}];\n"
+      },
+      "id": "3ffbd0bc-0896-4ed3-82a6-f7d7fe0c01ce",
+      "name": "Compute Analytics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "1cdfc861-d331-4e42-b10b-e59155c28fa1",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6640b043-42c7-4e69-9a1a-a1a4e1dbb3b3",
+      "name": "IF Analytics OK",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        464,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node: Build OpenAI classification request (structured JSON only)\n\nconst data = $('Compute Analytics').first().json;\nconst posts = data.posts.slice(0, 30);\n\nconst promptPosts = posts.map((p, idx) => ({\n  index: idx,\n  url: p.url,\n  type: p.type,\n  caption_preview: (p.caption || '').slice(0, 500),\n  views: p.views,\n  likes: p.likes,\n}));\n\nconst systemPrompt = `You are an Instagram content analyst. Classify ONLY from provided captions and metrics.\nReturn strict JSON: {\"posts\":[{\"index\":0,\"topic\":\"...\",\"hook_type\":\"...\"}],\"primary_language\":\"...\"}\ntopic must be one of: General, Education, Entertainment, Product, Lifestyle, Sports, News, Other\nhook_type must be one of: Educational, Question, Story, CTA, Trend, Emotional, Other\nNever invent metrics. If unclear, use General and Other.\\nAlso return primary_language (string, e.g. English, Hindi) inferred only from bio/captions, or empty string if unknown.`;\n\nconst userPrompt = JSON.stringify({\n  username: data.meta.username,\n  posts: promptPosts,\n});\n\nreturn [{\n  json: {\n    openai_body: {\n      model: 'openai/gpt-4o-mini',\n      temperature: 0.2,\n      response_format: { type: 'json_object' },\n      messages: [\n        { role: 'system', content: systemPrompt },\n        { role: 'user', content: userPrompt },\n      ],\n    },\n    analytics: data,\n  },\n}];\n"
+      },
+      "id": "4b83e745-c052-4a39-80ab-689bf0cb7164",
+      "name": "Build AI Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.openai_body) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "1860226f-6e2b-477d-ac75-b6a659b5df04",
+      "name": "OpenAI Classify Posts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        928,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "cgLOa3wHgmH0dma7",
+          "name": "OpenRouter API"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node: Merge OpenAI classifications into posts\n\nconst analytics = $('Build AI Request').first().json.analytics;\nlet posts = [...analytics.posts];\n\nconst aiRaw =\n  $json.choices?.[0]?.message?.content ||\n  $json.message?.content ||\n  $json.content ||\n  '{}';\n\nlet parsed = {};\nlet primaryLanguage = '';\ntry {\n  parsed = JSON.parse(aiRaw);\n  primaryLanguage = parsed.primary_language || '';\n} catch (e) {\n  parsed = { posts: [] };\n}\n\nconst byIndex = {};\nfor (const row of parsed.posts || []) {\n  if (row.index != null) byIndex[row.index] = row;\n}\n\nposts = posts.map((p, idx) => ({\n  ...p,\n  topic: byIndex[idx]?.topic || p.topic || 'General',\n  hook_type: byIndex[idx]?.hook_type || p.hook_type || 'Other',\n}));\n\nconst topicStats = aggregate(posts, 'topic');\nconst hookStats = aggregate(posts.filter((p) => p.type === 'Reel'), 'hook_type');\nconst captionStats = aggregate(posts, 'caption_length_bucket');\nconst dayStats = analytics.posting_day_breakdown || [];\n\nconst bestTopic = topicStats[0]?.key || 'General';\nconst bestHook = hookStats[0]?.key || 'Other';\nconst bestDay = dayStats[0]?.day || 'Unknown';\nconst worstDay = dayStats[dayStats.length - 1]?.day || 'Unknown';\nconst bestCaption = captionStats[0]?.key || 'Short (<30w)';\n\nconst insights = buildInsights({\n  analytics: { ...analytics, posts },\n  bestTopic,\n  bestHook,\n  bestDay,\n  worstDay,\n  bestCaption,\n  topicStats,\n  hookStats,\n  captionStats,\n});\n\nreturn [{\n  json: {\n    ok: true,\n    ...analytics,\n    posts,\n    insights,\n    primary_language: primaryLanguage,\n  },\n}];\n\nfunction aggregate(posts, field) {\n  const m = {};\n  for (const p of posts) {\n    const k = p[field] || 'Unknown';\n    if (!m[k]) m[k] = { views: [], rates: [] };\n    m[k].views.push(Number(p.views) || 0);\n    m[k].rates.push(Number(p.engagement_rate) || 0);\n  }\n  return Object.entries(m)\n    .map(([key, v]) => {\n      const avgViews = v.views.reduce((a, b) => a + b, 0) / v.views.length;\n      const avgRate = v.rates.reduce((a, b) => a + b, 0) / v.rates.length;\n      return { key, avgViews, avgRate, count: v.views.length };\n    })\n    .sort((a, b) => b.avgViews - a.avgViews);\n}\n\nfunction buildInsights(ctx) {\n  const m = ctx.analytics.metrics;\n  const top = ctx.analytics.top_posts[0];\n  return {\n    sections: [\n      [\n        '  WHAT IS WORKING',\n        [\n          ['BEST TOPIC', ctx.bestTopic, 'BEST POSTING DAY', ctx.bestDay],\n          [\n            `Avg ${Math.round(ctx.topicStats[0]?.avgViews || 0).toLocaleString()} views \u2014 focus here for max reach`,\n            '',\n            `Avg ${Math.round((ctx.analytics.posting_day_breakdown[0]?.avg_views) || 0).toLocaleString()} views \u2014 post more on this day`,\n            '',\n          ],\n          ['BEST HOOK TYPE', ctx.bestHook, 'BEST CAPTION LENGTH', ctx.bestCaption],\n          [\n            `Avg ${Math.round(ctx.hookStats[0]?.avgViews || 0).toLocaleString()} views \u2014 use this opening style more`,\n            '',\n            `Avg ${Math.round(ctx.captionStats[0]?.avgViews || 0).toLocaleString()} views \u2014 match this length going forward`,\n            '',\n          ],\n          [\n            'AVG ENGAGEMENT RATE',\n            `${(m.avg_engagement_rate * 100).toFixed(2)}%`,\n            'TOP REEL HOOK',\n            (top?.caption_preview || '').slice(0, 60),\n          ],\n        ],\n      ],\n      [\n        '  WHAT NEEDS IMPROVEMENT',\n        [\n          [\n            'POSTING FREQUENCY',\n            `${m.posting_frequency_per_week}/week  \u2014  On track`,\n            'LOW ENGAGEMENT REELS',\n            `${m.low_engagement_reels} reels below 1%`,\n          ],\n          [\n            `${m.post_count} reels in ${ctx.analytics.meta.window_days} days. Target 4-5/week for consistent algorithm reach.`,\n            '',\n            'These reels lack clear CTAs. End with: \"Comment [word] if you want [result]\"',\n            '',\n          ],\n          ['WEAKEST HOOK TYPE', ctx.hookStats[ctx.hookStats.length - 1]?.key || 'Other', 'WORST POSTING DAY', ctx.worstDay],\n        ],\n      ],\n      [\n        '  ACTION PLAN  \u2014  NEXT 30 DAYS',\n        [\n          ['1.  DOUBLE DOWN ON ' + ctx.bestTopic.toUpperCase(), '', '2.  USE MORE ' + ctx.bestHook.toUpperCase() + ' HOOKS', ''],\n          [\n            `60% of next month content \u2192 ${ctx.bestTopic}.`,\n            '',\n            `This hook style averages ${Math.round(ctx.hookStats[0]?.avgViews || 0).toLocaleString()} views.`,\n            '',\n          ],\n          ['3.  POST ON ' + ctx.bestDay.toUpperCase(), '', '4.  REPURPOSE TOP REEL', ''],\n          [\n            `Best day = ${ctx.bestDay}. Avoid ${ctx.worstDay} if possible.`,\n            '',\n            top ? `Your #1 post got ${(top.views || 0).toLocaleString()} views.` : '',\n            '',\n          ],\n        ],\n      ],\n    ],\n    posting_day_breakdown: ctx.analytics.posting_day_breakdown,\n  };\n}\n"
+      },
+      "id": "a92f4f56-f5a5-4b42-830c-199d87b7e16c",
+      "name": "Merge AI Classifications",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1168,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst ctx = $('Normalize Input').first().json;\nconst merged = $('Merge AI Classifications').first().json;\nconst enable = ctx.enable_whisper !== false;\nconst reels = (merged.posts || [])\n  .filter((p) => p.type === 'Reel' && p.video_url)\n  .slice(0, 7);\n\nif (!enable || !reels.length) {\n  return [{ json: { skip: true, skip_all: true } }];\n}\n\nreturn reels.map((p) => ({\n  json: {\n    skip: false,\n    skip_all: false,\n    url: p.url,\n    video_url: p.video_url,\n    caption: p.caption,\n    posted_at: p.posted_at,\n    views: p.views,\n  },\n}));\n"
+      },
+      "id": "9078832d-7ed2-44c7-9f9c-adccf591e727",
+      "name": "Prepare Whisper Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1408,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/audio/transcriptions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "whisper-1"
+            },
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "audio"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "ce4a44d3-e948-48bb-9176-26bdaf957973",
+      "name": "Whisper Transcribe (Optional)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1792,
+        -80
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst merged = $('Merge AI Classifications').first().json;\nconst reelPosts = (merged.posts || []).filter((p) => p.type === 'Reel');\n\nconst whisperByUrl = {};\ntry {\n  const whisperRows = $('Map Whisper Row').all();\n  for (const row of whisperRows) {\n    const j = row.json;\n    if (j.url && j.text) {\n      whisperByUrl[j.url] = { url: j.url, source: j.source || 'Whisper', text: j.text };\n    }\n  }\n} catch (e) {\n  // Whisper branch not executed\n}\n\nreturn reelPosts.map((p) => ({\n  json: whisperByUrl[p.url] || {\n    url: p.url,\n    source: 'Caption',\n    text: p.caption || '',\n    posted_at: p.posted_at,\n    views: p.views,\n  },\n}));\n"
+      },
+      "id": "b6cc3396-39ea-4f52-b1e1-394712cbcbee",
+      "name": "Merge Transcripts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1888,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node: Build final JSON payload for XLSX API + webhook response\n\nconst merged = $('Merge AI Classifications').first().json;\nconst profile = merged.profile;\nconst posts = merged.posts;\nconst metrics = merged.metrics;\nconst meta = merged.meta;\nconst privateWarning = merged.warning === 'PRIVATE_PROFILE' ? merged.message : '';\n\n// Transcripts from Whisper branch items (if any) merged via $('Merge Transcripts')\nlet transcriptItems = [];\ntry {\n  transcriptItems = $('Merge Transcripts').all().map((i) => i.json);\n} catch (e) {\n  transcriptItems = [];\n}\n\nconst transcriptByUrl = {};\nfor (const t of transcriptItems) {\n  if (t.url) transcriptByUrl[t.url] = t;\n}\n\nconst reelPosts = posts.filter((p) => p.type === 'Reel');\n\nconst transcripts = reelPosts.map((p, idx) => {\n  const hit = transcriptByUrl[p.url];\n  const source = hit?.source || (p.is_video ? 'Caption' : 'Caption');\n  const text = hit?.text || p.caption || '';\n  return {\n    index: idx + 1,\n    date: p.posted_at,\n    url: p.url,\n    views: p.views,\n    source,\n    text,\n  };\n});\n\nconst whisperCount = transcripts.filter((t) => t.source === 'Whisper').length;\nconst captionCount = transcripts.length - whisperCount;\n\nconst influencerRow = {\n  'Full Name': profile.full_name || '',\n  'Channel Name': profile.username || '',\n  'Influencer Category': profile.business_category || '',\n  'Gender': '',\n  'Email Id': '',\n  'CONTACT No.': '',\n  'Instagram Link': profile.profile_url || '',\n  'IG Followers': profile.followers ?? '',\n  'You Tube Link': '',\n  'YT Subs': '',\n  'Facebook Link': '',\n  'FB Followers': '',\n  'Linkedin Link': '',\n  'Linkedin Followers': '',\n  'Snapchat Link': '',\n  'SC Followers': '',\n  'External Link': profile.external_url || '',\n  'Country': '',\n  'State': '',\n  'City': '',\n  'Region': '',\n  'Regional/Primary Language': merged.primary_language || '',\n  'Influencer Type': profile.is_verified ? 'Verified' : 'Creator',\n  'Primary Platform': 'Instagram',\n  'AVG Views (Last 10 Posts)': metrics.avg_views_last_10 ?? '',\n};\n\nconst auditPosts = posts.map((p) => ({\n  date: p.posted_at,\n  type: p.type,\n  url: p.url,\n  views: p.views,\n  likes: p.likes,\n  comments: p.comments,\n  engagement: p.engagement,\n  engagement_rate_pct: p.engagement_rate_pct,\n  engagement_rate_display: p.engagement_rate_display,\n  status: p.status,\n  topic: p.topic,\n  hook_type: p.hook_type,\n  caption_preview: p.caption_preview,\n}));\n\nreturn [{\n  json: {\n    ok: true,\n    influencer_profile_row: influencerRow,\n    audit: {\n      meta,\n      metrics: {\n        post_count: metrics.post_count,\n        total_views: metrics.total_views,\n        avg_views: metrics.avg_views,\n        avg_likes: metrics.avg_likes,\n        avg_engagement_rate: metrics.avg_engagement_rate,\n      },\n      posts: auditPosts,\n      top_posts: merged.top_posts,\n      bottom_posts: merged.bottom_posts,\n      insights: merged.insights,\n      transcripts,\n      transcript_summary: `  Transcription summary: ${whisperCount} reels transcribed via Whisper  \u00b7  ${captionCount} reels using caption fallback`,\n    },\n    field_availability: {\n      scraped: [\n        'username',\n        'full_name',\n        'followers',\n        'biography',\n        'external_url',\n        'post_urls',\n        'likes',\n        'comments',\n        'views_on_video',\n        'captions',\n        'timestamps',\n      ],\n      calculated: [\n        'engagement',\n        'engagement_rate',\n        'avg_views',\n        'posting_frequency',\n        'posting_day_breakdown',\n        'top_bottom_posts',\n      ],\n      ai_inferred: ['topic', 'hook_type', 'recommendations', 'insights_text'],\n      unavailable_left_blank: [\n        'gender',\n        'email',\n        'phone',\n        'youtube',\n        'facebook',\n        'linkedin',\n        'snapchat',\n        'country',\n        'state',\n        'city',\n        'language_unless_inferred',\n      ],\n    },\n  },\n}];\n"
+      },
+      "id": "c59075e5-0fb7-45bf-8e59-2b39f2de231d",
+      "name": "Build Workbook Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2128,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Normalize Input').first().json.xlsx_api_url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ influencer_profile_row: $json.influencer_profile_row, audit: $json.audit }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "75787ef9-65a5-49e7-9de2-c02125239ec9",
+      "name": "Generate XLSX Workbooks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2368,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst payload = $('Build Workbook Payload').first().json;\nconst gen = $json;\nconst infB64 = gen.influencer_xlsx_base64;\nconst audB64 = gen.audit_xlsx_base64;\nconst username = payload.audit?.meta?.username || 'profile';\n\nif (!infB64 || !audB64) {\n  return [{\n    json: {\n      ok: true,\n      warning: 'XLSX_API_UNAVAILABLE',\n      has_binaries: false,\n      data: payload,\n      message: 'Workbook API did not return files. Deploy xlsx-api on Render and set xlsx_api_url in Normalize Input.',\n    },\n  }];\n}\n\nreturn [{\n  json: {\n    ok: true,\n    has_binaries: true,\n    username,\n    metrics: payload.audit.metrics,\n    influencer_filename: gen.influencer_filename,\n    audit_filename: gen.audit_filename,\n    zip_filename: `${username}_insta_audit_bundle.zip`,\n    field_availability: payload.field_availability,\n  },\n  binary: {\n    influencer_xlsx: {\n      data: infB64,\n      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',\n      fileName: gen.influencer_filename,\n    },\n    audit_xlsx: {\n      data: audB64,\n      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',\n      fileName: gen.audit_filename,\n    },\n  },\n}];\n"
+      },
+      "id": "153c2468-079d-45f3-a5c2-a68485a5ce8c",
+      "name": "Attach XLSX Binaries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2608,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "responseDataSource": "bundle_zip",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=\"insta_audit_bundle.zip\""
+              }
+            ]
+          }
+        }
+      },
+      "id": "a2db621b-e7bd-477e-830a-823dd9c34de7",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        3056,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e1",
+              "name": "ok",
+              "value": false,
+              "type": "boolean"
+            },
+            {
+              "id": "e2",
+              "name": "error",
+              "value": "={{ $json.error || 'UNKNOWN_ERROR' }}",
+              "type": "string"
+            },
+            {
+              "id": "e3",
+              "name": "message",
+              "value": "={{ $json.message || 'Workflow failed.' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "e99ddfdd-a0ae-42be-8272-74f8b59798a6",
+      "name": "Format Error Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -720,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: $json.ok, error: $json.error, message: $json.message }) }}",
+        "options": {
+          "responseCode": 422
+        }
+      },
+      "id": "2c568ad9-00a2-4d03-abeb-6ce27b2d87a1",
+      "name": "Respond Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        -496,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apify.com/v2/acts/apify~instagram-scraper/runs?waitForFinish=120",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  directUrls: [$('Normalize Input').first().json.profile_url],\n  resultsType: \"posts\",\n  resultsLimit: $('Normalize Input').first().json.max_posts,\n  searchType: \"user\",\n  searchLimit: 1\n}) }}",
+        "options": {
+          "response": {
+            "response": {}
+          },
+          "timeout": 180000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -976,
+        -336
+      ],
+      "id": "a682487d-6ae4-4890-acb0-905874dc4925",
+      "name": "Apify Post Run",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CdetZGK1EGbRdHD1",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apify.com/v2/acts/alwaysprimedev~instagram-profile-scraper/runs?waitForFinish=120",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ usernames: [$json.username] }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1056,
+        -624
+      ],
+      "id": "ac45e8bb-0c1c-4363-8282-763b4bb17b18",
+      "name": "Apify Profile Run",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "CdetZGK1EGbRdHD1",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $('Normalize Input').first().json;\nconst run = $json.data || $json;\nconst datasetId = run.defaultDatasetId || run.defaultDataset?.id;\n\nif (!datasetId) {\n  return [{\n    json: {\n      ok: false,\n      error: 'APIFY_RUN_FAILED',\n      message: 'Profile Apify run failed \u2014 no dataset ID.',\n      scrape_kind: 'profile',\n      raw: run,\n    },\n  }];\n}\n\nreturn [{ json: { ...ctx, datasetId, scrape_kind: 'profile' } }];\n"
+      },
+      "id": "8875ebfd-8eb7-4139-aced-0501dcafa42c",
+      "name": "Extract Profile Dataset ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -848,
+        -624
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.apify.com/v2/datasets/{{ $json.datasetId }}/items",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "clean",
+              "value": "true"
+            },
+            {
+              "name": "format",
+              "value": "json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "2e48c080-f07e-4466-a26f-a49449e57595",
+      "name": "Apify Fetch Profile Items",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -608,
+        -624
+      ],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "nZaAi2YBmiI3LPxa",
+          "name": "Query Auth account 4"
+        },
+        "httpHeaderAuth": {
+          "id": "CdetZGK1EGbRdHD1",
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all();\n\nif (!rows.length) {\n  return [{\n    json: {\n      ok: false,\n      error: 'EMPTY_DATASET',\n      message: 'Apify dataset returned zero items.'\n    }\n  }];\n}\n\nreturn rows.map(row => ({\n  json: row.json\n}));"
+      },
+      "id": "123eb4b8-c646-4506-9813-bf6f77852e4a",
+      "name": "Profile To Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -352,
+        -624
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $('Normalize Input').first().json;\nconst run = $json.data || $json;\nconst datasetId = run.defaultDatasetId || run.defaultDataset?.id;\n\nif (!datasetId) {\n  return [{\n    json: {\n      ok: false,\n      error: 'APIFY_RUN_FAILED',\n      message: 'Posts Apify run failed \u2014 no dataset ID.',\n      scrape_kind: 'posts',\n      raw: run,\n    },\n  }];\n}\n\nreturn [{ json: { ...ctx, datasetId, scrape_kind: 'posts' } }];\n"
+      },
+      "id": "08a2f31b-24a3-4754-9546-f0fae3d947d9",
+      "name": "Extract Posts Dataset ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -784,
+        -336
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.apify.com/v2/datasets/{{ $json.datasetId }}/items",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "clean",
+              "value": "true"
+            },
+            {
+              "name": "format",
+              "value": "json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "67b19cd6-ee6d-4526-9825-21b75b591cad",
+      "name": "Apify Fetch Posts Items",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -544,
+        -336
+      ],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "nZaAi2YBmiI3LPxa",
+          "name": "Query Auth account 4"
+        },
+        "httpHeaderAuth": {
+          "id": "CdetZGK1EGbRdHD1",
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all();\n\nif (!rows.length) {\n  return [{\n    json: {\n      ok: false,\n      error: 'EMPTY_DATASET',\n      message: 'Apify dataset returned zero items.'\n    }\n  }];\n}\n\nreturn rows.map(row => ({\n  json: row.json\n}));"
+      },
+      "id": "a52715f4-8583-4197-b57b-a64bd7b8091a",
+      "name": "Posts To Items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -288,
+        -336
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse AFTER both Profile To Items + Posts To Items ran (posts branch is last in chain).\n// Profile: alwaysprimedev/instagram-profile-scraper (followersCount, followsCount, postsCount)\n// Posts: apify/instagram-scraper resultsType posts\n\nconst ctx = $('Normalize Input').first().json;\n\nlet profileItems = [];\nlet postItems = [];\n\ntry {\n  profileItems = $('Profile To Items').all().map((i) => i.json);\n} catch (e) {\n  profileItems = [];\n}\n\ntry {\n  postItems = $('Posts To Items').all().map((i) => i.json);\n} catch (e) {\n  // Fallback: single-branch workflow\n  postItems = $input.all().map((i) => i.json);\n}\n\nfunction mapPostType(raw) {\n  const t = String(raw || '').toLowerCase();\n  if (t.includes('video') || t === 'reel' || t === 'clips') return 'Reel';\n  if (t.includes('side') || t.includes('carousel')) return 'Carousel';\n  if (t.includes('image') || t === 'photo') return 'Photo';\n  return raw || 'Post';\n}\n\nfunction normalizePost(p) {\n  const shortcode = p.shortCode || p.shortcode || p.id || '';\n  const url =\n    p.url ||\n    p.postUrl ||\n    (shortcode ? `https://www.instagram.com/p/${shortcode}/` : '');\n  const likes = Number(p.likesCount ?? p.likes ?? 0) || 0;\n  const comments = Number(p.commentsCount ?? p.comments ?? 0) || 0;\n  const views =\n    Number(p.videoViewCount ?? p.viewCount ?? p.views ?? p.playCount ?? 0) || 0;\n  const ts = p.timestamp || p.takenAt || p.createdAt || p.date;\n  const posted_at = ts ? new Date(ts).toISOString().slice(0, 10) : '';\n  const caption = (p.caption || p.text || '').trim();\n  const isVideo = !!(\n    p.isVideo ||\n    p.videoUrl ||\n    p.video_url ||\n    p.type === 'Video' ||\n    mapPostType(p.type || p.productType) === 'Reel'\n  );\n  return {\n    id: p.id || shortcode || url,\n    shortcode,\n    url,\n    posted_at,\n    type: mapPostType(p.type || (isVideo ? 'Reel' : 'Photo')),\n    likes,\n    comments,\n    views,\n    engagement: likes + comments,\n    caption,\n    caption_preview: caption.slice(0, 120),\n    video_url: p.videoUrl || p.video_url || '',\n    hashtags: p.hashtags || [],\n    is_video: isVideo,\n    location: (p.location && (p.location.name || p.location)) || '',\n  };\n}\n\nfunction pickCount(row, keys) {\n  for (const key of keys) {\n    const parts = key.split('.');\n    let v = row;\n    for (const part of parts) {\n      v = v?.[part];\n    }\n    if (v !== undefined && v !== null && v !== '') {\n      const n = Number(v);\n      if (!Number.isNaN(n)) return n;\n    }\n  }\n  return null;\n}\n\nfunction buildProfileFromRow(p) {\n  if (!p) return null;\n  return {\n    username: p.username || ctx.username,\n    full_name: p.fullName || p.full_name || p.name || '',\n    biography: p.biography || p.bio || '',\n    followers: pickCount(p, [\n      'followersCount',\n      'followers',\n      'followers_count',\n      'followerCount',\n      'edge_followed_by.count',\n    ]),\n    following: pickCount(p, [\n      'followsCount',\n      'followingCount',\n      'follows',\n      'following_count',\n      'following',\n      'edge_follow.count',\n      'counts.following',\n    ]),\n    posts_count: pickCount(p, [\n      'postsCount',\n      'posts',\n      'posts_count',\n      'postCount',\n      'mediaCount',\n      'edge_owner_to_timeline_media.count',\n    ]),\n    is_verified: !!(p.verified ?? p.isVerified),\n    is_private: !!(p.private ?? p.isPrivate),\n    external_url: p.externalUrl || p.external_url || '',\n    business_category:\n      p.businessCategoryName || p.business_category || p.category || '',\n    profile_pic_url: p.profilePicUrl || p.profilePicUrlHD || p.profile_pic_url || '',\n    profile_url: p.url || p.profileUrl || ctx.profile_url,\n    scraped_at: p.scrapedAt || p.extractedAt || new Date().toISOString(),\n  };\n}\n\n// Profile scraper: first row is usually the account\nconst profileRow =\n  profileItems.find((r) => r.followersCount != null || r.followers != null) ||\n  profileItems[0];\n\nlet profile = buildProfileFromRow(profileRow);\n\n// Posts: from posts scraper OR latestPosts on profile row\nlet posts = postItems\n  .filter((r) => r.type !== 'profile')\n  .filter((r) => !!(r.shortcode || r.shortCode || r.url || r.postUrl || r.caption || r.likesCount))\n  .map(normalizePost)\n  .filter((p) => p.url);\n\nif (!posts.length && profileRow?.latestPosts?.length) {\n  posts = profileRow.latestPosts.map(normalizePost).filter((p) => p.url);\n}\n\nif (!profile) {\n  return [{\n    json: {\n      ok: false,\n      error: 'NO_PROFILE',\n      message: 'Profile scraper returned no profile row. Check Apify Profile Run.',\n      username: ctx.username,\n    },\n  }];\n}\n\nif (profile.is_private) {\n  return [{\n    json: {\n      ok: true,\n      warning: 'PRIVATE_PROFILE',\n      message: 'Profile is private \u2014 post metrics unavailable; profile fields only.',\n      profile,\n      posts: [],\n    },\n  }];\n}\n\nif (!posts.length) {\n  return [{\n    json: {\n      ok: false,\n      error: 'NO_POSTS',\n      message: 'Posts scraper returned no posts. Check Apify Posts Run.',\n      profile,\n    },\n  }];\n}\n\nreturn [{\n  json: {\n    ok: true,\n    profile,\n    posts,\n    scrape_meta: {\n      profile_item_count: profileItems.length,\n      post_item_count: postItems.length,\n      posts_from_latestPosts: !postItems.length && !!profileRow?.latestPosts?.length,\n    },\n  },\n}];\n"
+      },
+      "id": "32e6661d-6125-41b3-b932-ba5de0c1c8d7",
+      "name": "Parse Merged Dataset",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        -336
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "compress",
+        "binaryPropertyName": "influencer_xlsx,audit_xlsx",
+        "outputFormat": "zip",
+        "fileName": "={{ $json.zip_filename || 'insta_audit_bundle.zip' }}",
+        "binaryPropertyOutput": "bundle_zip"
+      },
+      "type": "n8n-nodes-base.compression",
+      "typeVersion": 1.1,
+      "position": [
+        2816,
+        0
+      ],
+      "id": "d4947458-cc5f-48cf-8ed0-ebab2b650211",
+      "name": "Compression"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "e5d46214-9c11-4601-bc20-f7922b95ba6f",
+              "leftValue": "={{ $json.skip_all }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "96b356f6-45e5-4317-bd65-a7a25f53e0fb",
+      "name": "IF Whisper Needed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1520,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.video_url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "audio"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "86b95755-12e7-4107-adc0-7581dec02889",
+      "name": "Download Reel Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1664,
+        -80
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst prev = $('Download Reel Video').item.json;\nconst text = $json.text || $json.transcript || '';\nreturn [{\n  json: {\n    url: prev.url,\n    source: text ? 'Whisper' : 'Caption',\n    text: text || prev.caption || '',\n    posted_at: prev.posted_at,\n    views: prev.views,\n  },\n}];\n"
+      },
+      "id": "bd2a35ad-a6b0-41fb-80b6-0e11310c658c",
+      "name": "Map Whisper Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pass-through marker; Merge Transcripts reads Map Whisper Row via $('Map Whisper Row').all()\nreturn [{ json: { whisper_collected: true } }];",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "74c79ac6-d7ac-4a30-bad1-5444c9ca3b51",
+      "name": "Collect Whisper Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2048,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "b78fc797-9ca8-4795-8e81-33179c08f1e6",
+              "leftValue": "={{ $json.has_binaries }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "529ee40e-8d2f-4a3d-b609-a67ab3ecee8f",
+      "name": "IF Has XLSX",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "fefc1404-9a09-49cb-8a4e-72a16d1736df",
+      "name": "Respond JSON Fallback",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        3056,
+        160
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "IF Input Valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Input Valid": {
+      "main": [
+        [
+          {
+            "node": "Init Poll Counter",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Init Poll Counter": {
+      "main": [
+        [
+          {
+            "node": "Apify Profile Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Parse OK": {
+      "main": [
+        [
+          {
+            "node": "Compute Analytics",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Analytics": {
+      "main": [
+        [
+          {
+            "node": "IF Analytics OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Analytics OK": {
+      "main": [
+        [
+          {
+            "node": "Build AI Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build AI Request": {
+      "main": [
+        [
+          {
+            "node": "OpenAI Classify Posts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Classify Posts": {
+      "main": [
+        [
+          {
+            "node": "Merge AI Classifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge AI Classifications": {
+      "main": [
+        [
+          {
+            "node": "Prepare Whisper Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Whisper Items": {
+      "main": [
+        [
+          {
+            "node": "IF Whisper Needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Transcripts": {
+      "main": [
+        [
+          {
+            "node": "Build Workbook Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Workbook Payload": {
+      "main": [
+        [
+          {
+            "node": "Generate XLSX Workbooks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate XLSX Workbooks": {
+      "main": [
+        [
+          {
+            "node": "Attach XLSX Binaries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach XLSX Binaries": {
+      "main": [
+        [
+          {
+            "node": "IF Has XLSX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error Response": {
+      "main": [
+        [
+          {
+            "node": "Respond Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify Post Run": {
+      "main": [
+        [
+          {
+            "node": "Extract Posts Dataset ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify Profile Run": {
+      "main": [
+        [
+          {
+            "node": "Extract Profile Dataset ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Profile Dataset ID": {
+      "main": [
+        [
+          {
+            "node": "Apify Fetch Profile Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify Fetch Profile Items": {
+      "main": [
+        [
+          {
+            "node": "Profile To Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Posts Dataset ID": {
+      "main": [
+        [
+          {
+            "node": "Apify Fetch Posts Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apify Fetch Posts Items": {
+      "main": [
+        [
+          {
+            "node": "Posts To Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Posts To Items": {
+      "main": [
+        [
+          {
+            "node": "Parse Merged Dataset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Profile To Items": {
+      "main": [
+        [
+          {
+            "node": "Apify Post Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Merged Dataset": {
+      "main": [
+        [
+          {
+            "node": "IF Parse OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compression": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Whisper Needed": {
+      "main": [
+        [
+          {
+            "node": "Download Reel Video",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Transcripts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Reel Video": {
+      "main": [
+        [
+          {
+            "node": "Whisper Transcribe (Optional)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Whisper Transcribe (Optional)": {
+      "main": [
+        [
+          {
+            "node": "Map Whisper Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map Whisper Row": {
+      "main": [
+        [
+          {
+            "node": "Collect Whisper Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Whisper Results": {
+      "main": [
+        [
+          {
+            "node": "Merge Transcripts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Has XLSX": {
+      "main": [
+        [
+          {
+            "node": "Compression",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond JSON Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "1e98bf8f-2376-4d62-9d4d-f9eaf36a6a67",
+  "meta": {
+    "instanceId": "daaefdad8d1d05eed7b1af65a7f97bab011dd325b0c539eac3c9193d188fb1e6"
+  },
+  "id": "x5ef3r94o9Ea2gEq",
+  "tags": [
+    {
+      "updatedAt": "2026-05-25T16:51:44.734Z",
+      "createdAt": "2026-05-25T16:51:44.734Z",
+      "id": "4l5nxJMq3rRkEiLP",
+      "name": "instagram"
+    },
+    {
+      "updatedAt": "2026-05-25T16:51:44.759Z",
+      "createdAt": "2026-05-25T16:51:44.759Z",
+      "id": "Al7KS85Ir6Tlk1KN",
+      "name": "influencer-audit"
+    },
+    {
+      "updatedAt": "2026-05-25T16:51:44.786Z",
+      "createdAt": "2026-05-25T16:51:44.786Z",
+      "id": "erwW0BtmPtUuitSB",
+      "name": "production"
+    }
+  ]
+}
