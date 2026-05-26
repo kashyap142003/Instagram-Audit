@@ -1,0 +1,13 @@
+# Render Blueprint — deploy from repo root (sets rootDir to xlsx-api)
+services:
+  - type: web
+    name: instagram-audit
+    runtime: python
+    plan: free
+    rootDir: xlsx-api
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.3"

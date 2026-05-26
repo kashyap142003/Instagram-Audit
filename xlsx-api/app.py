@@ -237,6 +237,20 @@ def build_audit_workbook(audit: dict[str, Any]):
     return wb
 
 
+@app.get("/")
+def root():
+    """Render health check + wake endpoint."""
+    return {
+        "service": "insta-xlsx-api",
+        "status": "ok",
+        "endpoints": {"health": "/health", "generate": "POST /generate"},
+        "templates": {
+            "influencer": INFLUENCER_TEMPLATE.exists(),
+            "audit": AUDIT_TEMPLATE.exists(),
+        },
+    }
+
+
 @app.get("/health")
 def health():
     return {
